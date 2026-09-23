@@ -63,14 +63,14 @@ func _ready():
 func load_vap_video(video_path, config_path = ""):
 	stop()
 	var file = File.new()
-	if not file.file_exists(video_path):
-		_fail("VAP video does not exist: " + video_path)
+	var decoder_video_path = _materialize_video(video_path)
+	if decoder_video_path.empty():
 		return false
 	var config = {}
 	if not str(config_path).empty():
 		config = _load_json_config(config_path)
 	else:
-		config = extract_vapc_from_mp4(video_path)
+		config = extract_vapc_from_mp4(decoder_video_path)
 		if config.empty():
 			for companion_path in [video_path.get_base_dir().plus_file("vapc.json"), video_path.get_basename() + ".json"]:
 				if file.file_exists(companion_path):
@@ -82,8 +82,7 @@ func load_vap_video(video_path, config_path = ""):
 		return false
 
 	_decoder = Decoder.new()
-	var absolute_path = ProjectSettings.globalize_path(video_path)
-	if not _decoder.open(absolute_path):
+	if not _decoder.open(decoder_video_path):
 		_fail(_decoder.get_last_error())
 		_decoder = null
 		return false
@@ -109,6 +108,51 @@ func load_vap_video(video_path, config_path = ""):
 	if autoplay:
 		play()
 	return true
+
+
+func _materialize_video(video_path):
+	var file = File.new()
+	var absolute_path = ProjectSettings.globalize_path(video_path)
+	if file.file_exists(absolute_path):
+		return absolute_path
+
+	# Imported assets live inside the PCK after export. The native decoder cannot
+	# read that virtual path, so restore the bytes to a stable user:// cache file.
+	var imported_resource = load(video_path)
+	if imported_resource == null:
+		_fail("VAP video does not exist: " + str(video_path))
+		return ""
+	var data = imported_resource.get("data")
+	if typeof(data) != TYPE_RAW_ARRAY or data.empty():
+		_fail("VAP video import does not contain MP4 data: " + str(video_path))
+		return ""
+
+	var source_md5 = str(imported_resource.get("source_md5"))
+	if source_md5.empty():
+		source_md5 = str(video_path).md5_text() + "_" + str(data.size())
+	var cache_dir = "user://vap_cache"
+	var directory = Directory.new()
+	var error = directory.make_dir_recursive(cache_dir)
+	if error != OK and error != ERR_ALREADY_EXISTS:
+		_fail("Cannot create VAP video cache: " + cache_dir)
+		return ""
+
+	var cache_path = cache_dir.plus_file(source_md5 + ".mp4")
+	if file.file_exists(cache_path):
+		error = file.open(cache_path, File.READ)
+		if error == OK:
+			var cached_size = file.get_len()
+			file.close()
+			if cached_size == data.size():
+				return ProjectSettings.globalize_path(cache_path)
+
+	error = file.open(cache_path, File.WRITE)
+	if error != OK:
+		_fail("Cannot write VAP video cache: " + cache_path)
+		return ""
+	file.store_buffer(data)
+	file.close()
+	return ProjectSettings.globalize_path(cache_path)
 
 
 func extract_vapc_from_mp4(video_path):
